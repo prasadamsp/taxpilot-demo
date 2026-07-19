@@ -1,8 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const gemini = new GoogleGenerativeAI(Bun.env.GEMINI_API_KEY!);
-const claude = new Anthropic({ apiKey: Bun.env.ANTHROPIC_API_KEY });
+const gemini = new GoogleGenerativeAI(Bun.env.GEMINI_API_KEY ?? "");
+const claude = Bun.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: Bun.env.ANTHROPIC_API_KEY })
+  : null;
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
 
@@ -17,7 +19,8 @@ export interface InvoiceData {
   igst: number | null;
   total_amount: number | null;
   hsn_codes: string[];
-  confidence: number;  // 0-1
+  irn: string | null;           // e-Invoice Reference Number (64-char hex, mandatory for turnover >₹5Cr)
+  confidence: number;           // 0-1
 }
 
 export interface ParseResult {
@@ -39,6 +42,7 @@ const EXTRACTION_PROMPT = `Extract GST invoice data and return ONLY valid JSON m
   "igst": number or null,
   "total_amount": number or null,
   "hsn_codes": ["array", "of", "strings"],
+  "irn": "64-character hex string or null",
   "confidence": 0.0 to 1.0
 }
 
@@ -46,11 +50,12 @@ Rules:
 - All amounts in rupees (numbers, not strings)
 - GSTIN must be 15 characters if present
 - invoice_date in YYYY-MM-DD format
+- irn: the e-Invoice Reference Number printed as a QR code or plain text (64-char hex); null if not present
 - confidence: 0.9+ if all major fields clear, 0.7-0.9 if some fields unclear, <0.7 if image quality poor
 - Return ONLY the JSON object, no explanation`;
 
 async function parseWithGemini(imageBase64: string, mimeType: string): Promise<{ text: string; cost_paise: number }> {
-  const model = gemini.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const model = gemini.getGenerativeModel({ model: "gemini-2.5-flash" });
   const result = await model.generateContent([
     EXTRACTION_PROMPT,
     {
@@ -67,8 +72,8 @@ async function parseWithGemini(imageBase64: string, mimeType: string): Promise<{
 }
 
 async function parseWithClaude(imageBase64: string, mimeType: string): Promise<{ text: string; cost_paise: number }> {
-  const response = await claude.messages.create({
-    model: "claude-opus-4-6",
+  const response = await claude!.messages.create({
+    model: "claude-haiku-4-5-20251001",
     max_tokens: 1024,
     messages: [
       {
@@ -88,9 +93,9 @@ async function parseWithClaude(imageBase64: string, mimeType: string): Promise<{
     ],
   });
   const text = (response.content[0] as { text: string }).text;
-  // Claude claude-opus-4-6: ~$3/1M input, $15/1M output tokens
-  // Rough estimate: 2000 input (image) + 300 output = ~₹0.50 = 50 paise
-  return { text, cost_paise: 50 };
+  // Claude Haiku 4.5: ~$0.80/1M input, $4/1M output tokens
+  // Rough estimate: 2000 input (image) + 300 output = ~₹0.15 = 15 paise
+  return { text, cost_paise: 15 };
 }
 
 function extractJson(text: string): InvoiceData | null {
@@ -153,18 +158,18 @@ export async function parseInvoice(
   let geminiText: string;
   let geminiFailed = false;
 
+  let geminiResult: { data: InvoiceData; cost_paise: number } | null = null;
+
   try {
     const { text, cost_paise } = await parseWithGemini(imageBase64, mimeType);
     geminiText = text;
 
     const parsed = extractJson(text);
-    if (parsed && isValid(parsed)) {
-      return {
-        data: parsed,
-        model: "gemini",
-        cost_paise,
-        raw_text: text,
-      };
+    if (parsed) {
+      geminiResult = { data: parsed, cost_paise };
+      if (isValid(parsed)) {
+        return { data: parsed, model: "gemini", cost_paise, raw_text: text };
+      }
     }
   } catch (err) {
     console.error("Gemini parse failed:", err);
@@ -174,6 +179,14 @@ export async function parseInvoice(
 
   // Step 2: Fallback to Claude (better accuracy, ~10% of invoices)
   console.log(geminiFailed ? "Gemini API error, falling back to Claude" : "Gemini validation failed, falling back to Claude");
+
+  if (!claude) {
+    // No Claude configured — return Gemini's best effort (even if low confidence)
+    if (geminiResult) {
+      return { data: geminiResult.data, model: "gemini", cost_paise: geminiResult.cost_paise, raw_text: geminiText };
+    }
+    throw new Error("No AI provider available — set GEMINI_API_KEY or ANTHROPIC_API_KEY");
+  }
 
   const { text: claudeText, cost_paise: claudeCost } = await parseWithClaude(imageBase64, mimeType);
   const parsed = extractJson(claudeText);
@@ -192,6 +205,7 @@ export async function parseInvoice(
         igst: null,
         total_amount: null,
         hsn_codes: [],
+        irn: null,
         confidence: 0,
       },
       model: "claude",

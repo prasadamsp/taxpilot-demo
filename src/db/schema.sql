@@ -24,7 +24,9 @@ create table if not exists businesses (
   phone         text,
   email         text,
   state_code    text,
-  plan          text default 'trial',   -- trial | starter | professional
+  taxpayer_type text default 'regular',  -- regular | qrmp (Quarterly Return Monthly Payment scheme)
+  annual_turnover_cr numeric,            -- used to determine e-invoice applicability (mandatory >₹5Cr)
+  plan          text default 'trial',    -- trial | starter | professional
   trial_ends_at timestamptz default now() + interval '60 days',
   created_at    timestamptz default now()
 );
@@ -48,6 +50,7 @@ create table if not exists invoices (
   igst            numeric,
   total_amount    numeric,
   hsn_codes       text[],
+  irn             text,                  -- e-Invoice Reference Number (64-char hex); present if seller is e-invoice eligible
   status          text default 'parsed', -- parsed | reconciled | error
   parse_error     text,
   created_at      timestamptz default now()

@@ -50,20 +50,26 @@ export async function handleWebhook(body: WhatsAppWebhookBody): Promise<void> {
 
     // Route by message type
     if (message.type === "image") {
-      await handleImageMessage(message, business, from, msgId);
+      await handleInvoiceMedia(message.image!.id, message.image!.mime_type ?? "image/jpeg", business, from, msgId);
+    } else if (message.type === "document") {
+      const doc = message.document!;
+      if (doc.mime_type === "application/pdf") {
+        await handleInvoiceMedia(doc.id, "application/pdf", business, from, msgId);
+      } else {
+        await sendWhatsAppMessage(from, `Please send invoices as a *photo* or *PDF*. Other file types are not supported.`);
+      }
     } else if (message.type === "text") {
       await handleTextMessage(message.text!.body, business, from);
-    } else if (message.type === "document") {
-      await sendWhatsAppMessage(from, `Please send invoice as a *photo* (not a PDF). Tap the camera icon and photograph the invoice.`);
     } else {
-      await sendWhatsAppMessage(from, `Send me a *photo of an invoice* and I'll extract all the GST details automatically.`);
+      await sendWhatsAppMessage(from, `Send me a *photo* or *PDF of an invoice* and I'll extract all the GST details automatically.`);
     }
   }
 }
 
-// ── Image: parse invoice ──────────────────────────────────────────────────────
-async function handleImageMessage(
-  message: WhatsAppMessage,
+// ── Invoice media: parse image or PDF ────────────────────────────────────────
+async function handleInvoiceMedia(
+  mediaId: string,
+  mimeTypeHint: string,
   business: { id: string; legal_name: string | null },
   from: string,
   msgId: string
@@ -72,14 +78,15 @@ async function handleImageMessage(
 
   try {
     // Download the media file from WhatsApp
-    const { base64, mimeType } = await downloadMediaFile(message.image!.id);
+    const { base64, mimeType } = await downloadMediaFile(mediaId);
 
     // Parse with AI cascade (Gemini → Claude fallback)
     const result = await parseInvoice(base64, mimeType);
     const d = result.data;
 
-    // Store image in Supabase Storage
-    const filename = `${business.id}/${Date.now()}.jpg`;
+    // Store file in Supabase Storage
+    const ext = mimeType === "application/pdf" ? "pdf" : "jpg";
+    const filename = `${business.id}/${Date.now()}.${ext}`;
     const imageBytes = Buffer.from(base64, "base64");
     await supabase.storage.from("invoices").upload(filename, imageBytes, {
       contentType: mimeType,
@@ -106,6 +113,7 @@ async function handleImageMessage(
         igst: d.igst,
         total_amount: d.total_amount,
         hsn_codes: d.hsn_codes,
+        irn: d.irn,
         status: d.confidence > 0 ? "parsed" : "error",
         parse_error: d.confidence === 0 ? "Could not extract data from image" : null,
       })
@@ -130,6 +138,7 @@ async function handleImageMessage(
         `🧾 ${taxType}\n` +
         `💳 Total: ₹${d.total_amount?.toFixed(2) ?? "—"}\n` +
         (d.hsn_codes.length ? `🔖 HSN: ${d.hsn_codes.join(", ")}\n` : "") +
+        (d.irn ? `🔏 e-Invoice: ✓ IRN verified\n` : "") +
         `\n_Confidence: ${Math.round(d.confidence * 100)}%_`;
       await sendWhatsAppMessage(from, reply);
     }
@@ -225,5 +234,5 @@ interface WhatsAppMessage {
   type: string;
   text?: { body: string };
   image?: { id: string; mime_type: string };
-  document?: { id: string; mime_type: string };
+  document?: { id: string; mime_type: string; filename?: string };
 }

@@ -59,6 +59,12 @@ export async function handleApiRoute(req: Request): Promise<Response> {
     return registerBusiness(body);
   }
 
+  // GET /api/gstin/:gstin — live GSTIN lookup (Masters India or regex fallback)
+  if (method === "GET" && path.match(/^\/api\/gstin\/[A-Z0-9]{15}$/)) {
+    const gstin = path.split("/")[3] ?? "";
+    return gstinLookup(gstin);
+  }
+
   return json({ error: "Not found" }, 404);
 }
 
@@ -203,6 +209,74 @@ async function registerBusiness(body: BusinessRegistration): Promise<Response> {
 
   if (error) return json({ error: error.message }, 500);
   return json({ data }, 201);
+}
+
+// ── GSTIN Live Lookup ─────────────────────────────────────────────────────────
+
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+
+async function gstinLookup(gstin: string): Promise<Response> {
+  if (!GSTIN_REGEX.test(gstin)) {
+    return json({ valid: false, error: "Invalid GSTIN format" }, 400);
+  }
+
+  // State code from first 2 digits
+  const stateCode = gstin.substring(0, 2);
+  const STATE_CODES: Record<string, string> = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan",
+    "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
+    "13": "Nagaland", "14": "Manipur", "15": "Mizoram", "16": "Tripura",
+    "17": "Meghalaya", "18": "Assam", "19": "West Bengal", "20": "Jharkhand",
+    "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra", "28": "Andhra Pradesh",
+    "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala",
+    "33": "Tamil Nadu", "34": "Puducherry", "35": "Andaman & Nicobar Islands",
+    "36": "Telangana", "37": "Andhra Pradesh (new)", "38": "Ladakh",
+    "97": "Other Territory", "99": "Centre Jurisdiction",
+  };
+
+  const localResult = {
+    valid: true,
+    gstin,
+    state_code: stateCode,
+    state: STATE_CODES[stateCode] ?? "Unknown",
+    pan: gstin.substring(2, 12),
+    entity_type: gstin[12] === "1" ? "Proprietor" : gstin[12] === "2" ? "Partnership" : "Company/Other",
+    source: "local",
+  };
+
+  // If Masters India API key is configured, fetch live data
+  const miKey = Bun.env.MASTERS_INDIA_API_KEY;
+  const miBase = Bun.env.MASTERS_INDIA_BASE_URL ?? "https://commonapi.mastersindia.co";
+
+  if (miKey) {
+    try {
+      const res = await fetch(`${miBase}/commonapi/v1.0/getgstin?gstin=${gstin}`, {
+        headers: { "client_id": miKey, "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json() as Record<string, unknown>;
+        return json({
+          valid: true,
+          gstin,
+          state_code: stateCode,
+          state: STATE_CODES[stateCode] ?? "Unknown",
+          legal_name: data.lgnm ?? null,
+          trade_name: data.tradeNam ?? null,
+          registration_date: data.rgdt ?? null,
+          taxpayer_type: data.dty ?? null,
+          status: data.sts ?? null,
+          source: "masters_india",
+        });
+      }
+    } catch {
+      // Fall through to local result
+    }
+  }
+
+  return json(localResult);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

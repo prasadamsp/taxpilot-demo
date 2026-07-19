@@ -6,8 +6,12 @@ services:
     startCommand: "bun index.ts"
     envVars:
       - key: PORT
-        value: "3000"
+        value: "10000"
       - key: NODE_ENV
         value: production
       - key: GEMINI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
         sync: false

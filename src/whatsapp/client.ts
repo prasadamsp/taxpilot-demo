@@ -1,6 +1,6 @@
 const PHONE_NUMBER_ID = Bun.env.WHATSAPP_PHONE_NUMBER_ID!;
 const TOKEN = Bun.env.WHATSAPP_TOKEN!;
-const API_BASE = `https://graph.facebook.com/v19.0`;
+const API_BASE = `https://graph.facebook.com/v21.0`;
 
 // ── Send a text message ───────────────────────────────────────────────────────
 export async function sendWhatsAppMessage(to: string, text: string): Promise<void> {
